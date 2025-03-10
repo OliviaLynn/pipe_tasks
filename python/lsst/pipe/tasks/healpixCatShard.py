@@ -41,8 +41,10 @@ import re
 import warnings
 import math
 from datetime import datetime
+import hats.pixel_math.healpix_shim as hp
 import hpgeom as hpg
 import healsparse as hsp
+import pandas as pd
 from astropy.io import fits
 
 try:
@@ -158,22 +160,37 @@ class HealpixCatShardTask(pipeBase.PipelineTask):
         outputs : `lsst.pipe.base.Struct`
             ``hips_exposures`` is a dict with pixel (key) and hips_exposure (value)
         """
-        # LIV: this is where the actual logic will go
-        # loop over the list of catalog handles, and that's what we can apply .get to to get the actual data
-        # then for the dfs, we can feed this to out radec2pix method
-        # Recommend: create output dict to be a default dict, so when you look up a pixel id it's all good
-        # Important thing is at the end of it all, you have a df that corresponds to a hp pixel and the set of
-        # all hp pixels is exactly the list of all pixels we took in
-        # Pixels==what the butler knows about the outputs
-        # so we're dropping irrelevant pixels, bc imagine a tract that is pulled into 2 diff pixels (don't need dupes)
-        # Recommend turning pixels list in to set, loop over, if its hp pix not in the set f pixels were interested in (the pixels param)
-        # then just skip it. But if it is, add it to a df that corresponds to that set of pixels
-        # Before even starting maybe make empty dfs for each pixel--but perhaps not
-        # And note these pixels are just the hp11 pixels that correspond to the hp9 dim we've said we're working on
+        # Get a set of the expected hp11 pixels for this hp9 pixel.
+        expected_pixels = set(pixels)
 
-        # LIV TODO look into SimpleNamespace--this was from Rubin making this before SimpleNamespace came out
-        # And note line above `        for pixel, healpix_catalog in outputs.healpix_catalogs.items():`
-        return pipeBase.Struct(healpix_catalogs=dict_name)  # keys pixels, vals dfs
+        # Create a dict to hold the relevant objects for each expected pixel.
+        relevant_objects_that_correspond_to_expected_pixels = defaultdict(list)  # We'll convert to dfs later
+
+        # Loop over the list of catalog handles get the actual data.
+        for catalog_handle in healpix_catalog_handles:
+            catalog_df = catalog_handle.get()
+
+            # Feed these dataframes to HATS' radec2pix method.
+            ra_column = "ra"
+            dec_column = "dec"
+            highest_order = 11
+            mapped_pixels = hp.radec2pix(
+                highest_order,
+                catalog_df[ra_column].to_numpy(copy=False, dtype=float),
+                catalog_df[dec_column].to_numpy(copy=False, dtype=float),
+            )
+
+            # Only keep the objects that correspond to the hp11 pixels we'll be outputting.
+            for pixel, row in zip(mapped_pixels, catalog_df.iterrows()):
+                if pixel in expected_pixels:
+                    relevant_objects_that_correspond_to_expected_pixels[pixel].append(row)
+
+        # Convert each pixel's list of objects to a dataframe.
+        for pixel, rows in relevant_objects_that_correspond_to_expected_pixels.items():
+            relevant_objects_that_correspond_to_expected_pixels[pixel] = pd.DataFrame(rows)
+
+        # Return the dict (keys hp11 pixels, vals object dataframes).
+        return pipeBase.Struct(healpix_catalogs=relevant_objects_that_correspond_to_expected_pixels)
 
     @classmethod
     def build_quantum_graph_cli(cls, argv):
