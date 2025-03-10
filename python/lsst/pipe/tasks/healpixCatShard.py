@@ -91,8 +91,6 @@ class HealpixCatShardConnections(pipeBase.PipelineTaskConnections, dimensions=("
     def __init__(self, *, config=None):
         super().__init__(config=config)
 
-        # It was interesting--N was saying this was particularly careful, tal vez demasiado
-
         quantum_order = None
         for dim in self.dimensions:
             if "healpix" in dim:
@@ -101,7 +99,6 @@ class HealpixCatShardConnections(pipeBase.PipelineTaskConnections, dimensions=("
                 quantum_order = int(dim.split("healpix")[1])
         if quantum_order is None:
             raise ValueError("Must specify a healpix dimension in quantum dimensions.")
-        # LIV: to help with course grain to fine grain, making sure orientation matches.
 
         order = None
         for dim in self.healpix_catalog.dimensions:
@@ -111,7 +108,6 @@ class HealpixCatShardConnections(pipeBase.PipelineTaskConnections, dimensions=("
                 order = int(dim.split("healpix")[1])
         if order is None:
             raise ValueError("Must specify a healpix dimension in healpix_catalog dimensions.")
-        # LIV: the same here. looking at output dimensions, making sure it's a smaller dim, etc.
 
 
 class HealpixCatShardConfig(pipeBase.PipelineTaskConfig, pipelineConnections=HealpixCatShardConnections):
@@ -121,7 +117,7 @@ class HealpixCatShardConfig(pipeBase.PipelineTaskConfig, pipelineConnections=Hea
 
 
 class HealpixCatShardTask(pipeBase.PipelineTask):
-    """Task for making HealpixCatShard cats TODO."""
+    """Task for making HealpixCatShard cats ."""
 
     ConfigClass = HealpixCatShardConfig
     _DefaultName = "healpixCatShardTask"
@@ -133,7 +129,6 @@ class HealpixCatShardTask(pipeBase.PipelineTask):
         healpix_dim = "healpix11"
 
         pixels = [healpix_catalog.dataId[healpix_dim] for healpix_catalog in outputRefs.healpix_catalogs]
-        # LIV: this gives you a list of your actual pixels (numerical id)
 
         outputs = self.run(pixels=pixels, catalog_handles=inputs["catalog_handles"])
 
@@ -143,22 +138,24 @@ class HealpixCatShardTask(pipeBase.PipelineTask):
         }
         for pixel, healpix_catalog in outputs.healpix_catalogs.items():
             butlerQC.put(healpix_catalog, healpix_catalog_ref_dict[pixel])
-        # LIV : our run method will output this in its return struct
 
     def run(self, pixels, healpix_catalog_handles):
-        """Run the TODO .
+        """Run the HealpixCatShardTask.
+
+        Produces a dictionary of object dataframes for the given healpix9
+        pixel, one catalog per healpix11 output pixel.
 
         Parameters
         ----------
         pixels : `Iterable` [ `int` ]
             Iterable of healpix pixels (nest ordering) to warp to.
-        coadd_exposure_handles : `list` [`lsst.daf.butler.DeferredDatasetHandle`]
-            Handles for the coadd exposures. TODO
+        healpix_catalog_handles : `list` [`lsst.daf.butler.DeferredDatasetHandle`]
+            Handles for the input catalogs.
 
         Returns
         -------
         outputs : `lsst.pipe.base.Struct`
-            ``hips_exposures`` is a dict with pixel (key) and hips_exposure (value)
+            ``healpix_catalogs`` is a dict of object dataframes for each healpix11 pixel.
         """
         # Get a set of the expected hp11 pixels for this hp9 pixel.
         expected_pixels = set(pixels)
