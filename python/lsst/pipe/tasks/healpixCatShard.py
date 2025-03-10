@@ -75,23 +75,21 @@ class HealpixCatShardConnections(pipeBase.PipelineTaskConnections, dimensions=("
         name="diaObjectTable_tract",
         storageClass="DataFrame",
         dimensions=("tract", "skymap"),
-        multiple=True,  # LIV: Bc multiple catalogs may overlap
-        # Imagine then you load ref catalogs with tract, patch, so you have multiple that count for the same tract
-        deferLoad=True,  # LIV: Just get a handle, don't get all data just now. TODO : not necessarily sure if this is needed, but probably
+        multiple=True,
+        deferLoad=True,
     )
     healpix_catalogs = pipeBase.connectionTypes.Output(
         doc="Healpix sharded object catalog.",
-        name="healpix11_sharded_catalog",  # LIV: lately, convention has been snake case rather than camel case
-        # When you test this code, this will be declared into the butler, unless you delete all instances
-        # and then delete the type
-        storageClass="ArrowAstropy",  # TODO :  check in on this (but Jim prefers ArrowAstropy)
+        name="healpix11_sharded_catalog",
+        storageClass="ArrowAstropy",
         dimensions=("healpix11",),
         mulitple=True,
-        # LIV : with output to healpix11, we would be expected to divy up the healpix9 ourselves
     )
 
     def __init__(self, *, config=None):
         super().__init__(config=config)
+
+        # It was interesting--N was saying this was particularly careful, tal vez demasiado
 
         quantum_order = None
         for dim in self.dimensions:
@@ -124,15 +122,13 @@ class HealpixCatShardTask(pipeBase.PipelineTask):
     """Task for making HealpixCatShard cats TODO."""
 
     ConfigClass = HealpixCatShardConfig
-    _DefaultName = "healpixCatShardTask"  # LIV: often used to apply instrument-specfic configs
+    _DefaultName = "healpixCatShardTask"
 
     @timeMethod
     def runQuantum(self, butlerQC, inputRefs, outputRefs):
         inputs = butlerQC.get(inputRefs)
 
         healpix_dim = "healpix11"
-        # LIV : note, if we wanted to make things configurable, this is a thing we would want to change
-        # however, we are not going to jump the gun on this
 
         pixels = [healpix_catalog.dataId[healpix_dim] for healpix_catalog in outputRefs.healpix_catalogs]
         # LIV: this gives you a list of your actual pixels (numerical id)
@@ -143,7 +139,6 @@ class HealpixCatShardTask(pipeBase.PipelineTask):
             healpix_catalog.dataId[healpix_dim]: healpix_catalog
             for healpix_catalog in outputRefs.healpix_catalogs
         }
-        # LIV: need to assoc the ref with the ordering, bc there's no guarantee on the ordering of output
         for pixel, healpix_catalog in outputs.healpix_catalogs.items():
             butlerQC.put(healpix_catalog, healpix_catalog_ref_dict[pixel])
         # LIV : our run method will output this in its return struct
