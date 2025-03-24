@@ -544,6 +544,19 @@ class HealpixCatShardQuantumGraphBuilder(QuantumGraphBuilder):
 # - class GenerateColorHipsConfig(GenerateHipsConfig, pipelineConnections=GenerateColorHipsConnections):
 # - class GenerateColorHipsTask(GenerateHipsTask):
 
+from lsst.resources import ResourcePath
+
+
+def download_healpix_catalogs(butler: Butler, collection, location, name="healpix11_sharded_catalog"):
+    # name is set in the task above - the output dataset type name
+    # location : where you want it written to
+    base = ResourcePath(location, forceDirectory=True)
+    data_ids = butler.registry.queryDatasets(name, collections=collection)
+    uris = butler.getUris(data_ids)
+    for uri in uris:
+        new_uri = base.join(uri.primaryURI.basename)
+        new_uri.transfer_from(uri.primaryURI, tranfer="copy")
+
 
 class GenerateHipsConnections(
     pipeBase.PipelineTaskConnections,
