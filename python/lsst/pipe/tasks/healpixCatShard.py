@@ -160,8 +160,8 @@ class HealpixCatShardTask(pipeBase.PipelineTask):
         # Get a set of the expected hp11 pixels for this hp9 pixel.
         expected_pixels = set(pixels)
 
-        # Create a dict to hold the relevant objects for each expected pixel.
-        relevant_objects_that_correspond_to_expected_pixels = defaultdict(list)  # We'll convert to dfs later
+        # Create a dict to hold the relevant objects for each expected pixel. (We'll convert to dfs later.)
+        relevant_objects_that_correspond_to_expected_pixels = defaultdict(list)
 
         # Loop over the list of catalog handles get the actual data.
         for catalog_handle in healpix_catalog_handles:
@@ -221,7 +221,7 @@ class HealpixCatShardTask(pipeBase.PipelineTask):
         if args.subparser_name == "segment":
             # Do the segmentation
             hpix_pixelization = HealpixPixelization(level=args.hpix_build_order)
-            dataset = task_node.inputs["coadd_exposure_handles"].dataset_type_name
+            dataset = task_node.inputs["catalog_handles"].dataset_type_name
             with butler.query() as q:
                 data_ids = list(q.join_dataset_search(dataset).data_ids("tract").with_dimension_records())
             region_pixels = []
@@ -257,7 +257,7 @@ class HealpixCatShardTask(pipeBase.PipelineTask):
                 "time": f"{datetime.now()}",
             }
 
-            builder = HighResolutionHipsQuantumGraphBuilder(
+            builder = HealpixCatShardQuantumGraphBuilder(
                 pipeline_graph,
                 butler,
                 input_collections=args.input,
@@ -278,12 +278,12 @@ class HealpixCatShardTask(pipeBase.PipelineTask):
         parser : `argparse.ArgumentParser`
         """
         parser = argparse.ArgumentParser(
-            description=("Build a QuantumGraph that runs HighResolutionHipsTask on existing coadd datasets."),
+            description=("Build a QuantumGraph that runs HealpixCatShardTask on existing catalog datasets."),
         )
         subparsers = parser.add_subparsers(help="sub-command help", dest="subparser_name")
 
         parser_segment = subparsers.add_parser("segment", help="Determine survey segments for workflow.")
-        parser_build = subparsers.add_parser("build", help="Build quantum graph for HighResolutionHipsTask")
+        parser_build = subparsers.add_parser("build", help="Build quantum graph for HealpixCatShardTask.")
 
         for sub in [parser_segment, parser_build]:
             # These arguments are in common.
@@ -306,7 +306,7 @@ class HealpixCatShardTask(pipeBase.PipelineTask):
                 "--input",
                 type=str,
                 nargs="+",
-                help="Input collection(s) to search for coadd exposures.",
+                help="Input collection(s) to search for catalogs.",
                 required=True,
             )
             sub.add_argument(
@@ -321,7 +321,7 @@ class HealpixCatShardTask(pipeBase.PipelineTask):
                 "--where",
                 type=str,
                 default="",
-                help="Data ID expression used when querying for input coadd datasets.",
+                help="Data ID expression used when querying for input catalog datasets.",
             )
 
         parser_build.add_argument(
@@ -339,7 +339,7 @@ class HealpixCatShardTask(pipeBase.PipelineTask):
             "--output-run",
             type=str,
             help=(
-                "Output RUN collection to write resulting images. If not provided "
+                "Output RUN collection to write resulting catalogs. If not provided "
                 "then --output must be provided and a new RUN collection will be created "
                 "by appending a timestamp to the value passed with --output."
             ),
@@ -365,9 +365,9 @@ class HealpixCatShardTask(pipeBase.PipelineTask):
         return parser
 
 
-class HighResolutionHipsQuantumGraphBuilder(QuantumGraphBuilder):
+class HealpixCatShardQuantumGraphBuilder(QuantumGraphBuilder):
     """A custom a `lsst.pipe.base.QuantumGraphBuilder` for running
-    `HighResolutionHipsTask` only.
+    `HealpixCatShardTask` only.
 
     This is a workaround for incomplete butler query support for HEALPix
     dimensions.
@@ -441,9 +441,7 @@ class HighResolutionHipsQuantumGraphBuilder(QuantumGraphBuilder):
         # We will need all the pixels at the quantum resolution as well.
         # '4' appears here frequently because it's the number of pixels at
         # level N in a single pixel at level (N-1).
-        (hpx_dimension,) = (
-            self.butler.dimensions.skypix_dimensions[d] for d in task_node.dimensions.names if d != "band"
-        )
+        (hpx_dimension,) = (self.butler.dimensions.skypix_dimensions[d] for d in task_node.dimensions.names)
         hpx_pixelization = hpx_dimension.pixelization
         if hpx_pixelization.level < self.constraint_order:
             raise ValueError(f"Quantum order {hpx_pixelization.level} must be < {self.constraint_order}")
@@ -479,7 +477,7 @@ class HighResolutionHipsQuantumGraphBuilder(QuantumGraphBuilder):
                 where_terms.append(common_skypix_proxy.in_range(begin, end))
         where = xf.any(*where_terms)
         # Query for input datasets with this constraint, and ask for expanded
-        # data IDs because we want regions.  Immediately group this by patch so
+        # data IDs because we want regions.  Immediately group this by tract so
         # we don't do later geometric stuff n_bands more times than we need to.
         with self.butler.query() as query:
             input_refs = (
@@ -490,180 +488,61 @@ class HighResolutionHipsQuantumGraphBuilder(QuantumGraphBuilder):
                 )
                 .with_dimension_records()
             )
-            inputs_by_patch = defaultdict(set)
-            patch_dimensions = self.butler.dimensions.conform(["patch"])
+            inputs_by_tract = defaultdict(set)
+            tract_dimensions = self.butler.dimensions.conform(["tract"])
             skeleton = QuantumGraphSkeleton([task_node.label])
             for input_ref in input_refs:
                 dataset_key = skeleton.add_dataset_node(input_ref.datasetType.name, input_ref.dataId)
                 skeleton.set_dataset_ref(input_ref, dataset_key)
-                inputs_by_patch[input_ref.dataId.subset(patch_dimensions)].add(dataset_key)
-            if not inputs_by_patch:
+                inputs_by_tract[input_ref.dataId.subset(tract_dimensions)].add(dataset_key)
+            if not inputs_by_tract:
                 message_body = "\n".join(input_refs.explain_no_results())
                 raise RuntimeError(f"No inputs found:\n{message_body}")
 
-        # Iterate over patches and compute the set of output healpix pixels
+        # Iterate over tracts and compute the set of output healpix pixels
         # that overlap each one.  Use that to associate inputs with output
         # pixels, but only for the output pixels we've already identified.
         inputs_by_hpx = defaultdict(set)
-        for patch_data_id, input_keys_for_patch in inputs_by_patch.items():
-            patch_hpx_ranges = hpx_pixelization.envelope(patch_data_id.region)
-            for begin, end in patch_hpx_ranges & hpx_ranges:
+        for tract_data_id, input_keys_for_tract in inputs_by_tract.items():
+            tract_hpx_ranges = hpx_pixelization.envelope(tract_data_id.region)
+            for begin, end in tract_hpx_ranges & hpx_ranges:
                 for hpx_index in range(begin, end):
-                    inputs_by_hpx[hpx_index].update(input_keys_for_patch)
+                    inputs_by_hpx[hpx_index].update(input_keys_for_tract)
 
-        # Iterate over the dict we just created and create preliminary quanta.
         for hpx_index, input_keys_for_hpx_index in inputs_by_hpx.items():
-            # Group inputs by band.
-            input_keys_by_band = defaultdict(list)
-            for input_key in input_keys_for_hpx_index:
-                input_ref = skeleton.get_dataset_ref(input_key)
-                assert input_ref is not None, "Code above adds the same nodes to the graph with refs."
-                input_keys_by_band[input_ref.dataId["band"]].append(input_key)
-            # Iterate over bands to make quanta.
-            for band, input_keys_for_band in input_keys_by_band.items():
-                data_id = self.butler.registry.expandDataId({hpx_dimension.name: hpx_index, "band": band})
-                quantum_key = skeleton.add_quantum_node(task_node.label, data_id)
-                # Add inputs to the skelton
-                skeleton.add_input_edges(quantum_key, input_keys_for_band)
-                # Add the regular outputs.
-                hpx_pixel_ranges = RangeSet(hpx_index)
-                hpx_output_ranges = hpx_pixel_ranges.scaled(
-                    4 ** (task_node.config.hips_order - hpx_pixelization.level)
-                )
-                for begin, end in hpx_output_ranges:
-                    for hpx_output_index in range(begin, end):
-                        dataset_key = skeleton.add_dataset_node(
-                            output_dataset_type_node.name,
-                            self.butler.registry.expandDataId(
-                                {hpx_output_dimension: hpx_output_index, "band": band}
-                            ),
-                        )
-                        skeleton.add_output_edge(quantum_key, dataset_key)
-                # Add auxiliary outputs (log, metadata).
-                for write_edge in task_node.iter_all_outputs():
-                    if write_edge.connection_name == output_edge.connection_name:
-                        continue
-                    dataset_key = skeleton.add_dataset_node(write_edge.parent_dataset_type_name, data_id)
+            data_id = self.butler.registry.expandDataId({hpx_dimension.name: hpx_index})
+            quantum_key = skeleton.add_quantum_node(task_node.label, data_id)
+            # Add inputs to the skelton
+            skeleton.add_input_edges(quantum_key, input_keys_for_hpx_index)
+            # Add the regular outputs.
+            hpx_pixel_ranges = RangeSet(hpx_index)
+            hpx_output_ranges = hpx_pixel_ranges.scaled(
+                4 ** (task_node.config.hips_order - hpx_pixelization.level)
+            )
+            for begin, end in hpx_output_ranges:
+                for hpx_output_index in range(begin, end):
+                    dataset_key = skeleton.add_dataset_node(
+                        output_dataset_type_node.name,
+                        self.butler.registry.expandDataId({hpx_output_dimension: hpx_output_index}),
+                    )
                     skeleton.add_output_edge(quantum_key, dataset_key)
+            # Add auxiliary outputs (log, metadata).
+            for write_edge in task_node.iter_all_outputs():
+                if write_edge.connection_name == output_edge.connection_name:
+                    continue
+                dataset_key = skeleton.add_dataset_node(write_edge.parent_dataset_type_name, data_id)
+                skeleton.add_output_edge(quantum_key, dataset_key)
         return skeleton
 
 
-class HipsPropertiesSpectralTerm(pexConfig.Config):
-    lambda_min = pexConfig.Field(
-        doc="Minimum wavelength (nm)",
-        dtype=float,
-    )
-    lambda_max = pexConfig.Field(
-        doc="Maximum wavelength (nm)",
-        dtype=float,
-    )
-
-
-class HipsPropertiesConfig(pexConfig.Config):
-    """Configuration parameters for writing a HiPS properties file."""
-
-    creator_did_template = pexConfig.Field(
-        doc=("Unique identifier of the HiPS - Format: IVOID. " "Use ``{band}`` to substitute the band name."),
-        dtype=str,
-        optional=False,
-    )
-    obs_collection = pexConfig.Field(
-        doc="Short name of original data set - Format: one word",
-        dtype=str,
-        optional=True,
-    )
-    obs_description_template = pexConfig.Field(
-        doc=(
-            "Data set description - Format: free text, longer free text "
-            "description of the dataset.  Use ``{band}`` to substitute "
-            "the band name."
-        ),
-        dtype=str,
-    )
-    prov_progenitor = pexConfig.ListField(
-        doc="Provenance of the original data - Format: free text",
-        dtype=str,
-        default=[],
-    )
-    obs_title_template = pexConfig.Field(
-        doc=(
-            "Data set title format: free text, but should be short. "
-            "Use ``{band}`` to substitute the band name."
-        ),
-        dtype=str,
-        optional=False,
-    )
-    spectral_ranges = pexConfig.ConfigDictField(
-        doc=("Mapping from band to lambda_min, lamba_max (nm).  May be approximate."),
-        keytype=str,
-        itemtype=HipsPropertiesSpectralTerm,
-        default={},
-    )
-    initial_ra = pexConfig.Field(
-        doc="Initial RA (deg) (default for HiPS viewer).  If not set will use a point in MOC.",
-        dtype=float,
-        optional=True,
-    )
-    initial_dec = pexConfig.Field(
-        doc="Initial Declination (deg) (default for HiPS viewer).  If not set will use a point in MOC.",
-        dtype=float,
-        optional=True,
-    )
-    initial_fov = pexConfig.Field(
-        doc="Initial field-of-view (deg).  If not set will use ~1 healpix tile.",
-        dtype=float,
-        optional=True,
-    )
-    obs_ack = pexConfig.Field(
-        doc="Observation acknowledgements (free text).",
-        dtype=str,
-        optional=True,
-    )
-    t_min = pexConfig.Field(
-        doc="Time (MJD) of earliest observation included in HiPS",
-        dtype=float,
-        optional=True,
-    )
-    t_max = pexConfig.Field(
-        doc="Time (MJD) of latest observation included in HiPS",
-        dtype=float,
-        optional=True,
-    )
-
-    def validate(self):
-        super().validate()
-
-        if self.obs_collection is not None:
-            if re.search(r"\s", self.obs_collection):
-                raise ValueError("obs_collection cannot contain any space characters.")
-
-    def setDefaults(self):
-        # Values here taken from
-        # https://github.com/lsst-dm/dax_obscore/blob/44ac15029136e2ec15/configs/dp02.yaml#L46
-        u_term = HipsPropertiesSpectralTerm()
-        u_term.lambda_min = 330.0
-        u_term.lambda_max = 400.0
-        self.spectral_ranges["u"] = u_term
-        g_term = HipsPropertiesSpectralTerm()
-        g_term.lambda_min = 402.0
-        g_term.lambda_max = 552.0
-        self.spectral_ranges["g"] = g_term
-        r_term = HipsPropertiesSpectralTerm()
-        r_term.lambda_min = 552.0
-        r_term.lambda_max = 691.0
-        self.spectral_ranges["r"] = r_term
-        i_term = HipsPropertiesSpectralTerm()
-        i_term.lambda_min = 691.0
-        i_term.lambda_max = 818.0
-        self.spectral_ranges["i"] = i_term
-        z_term = HipsPropertiesSpectralTerm()
-        z_term.lambda_min = 818.0
-        z_term.lambda_max = 922.0
-        self.spectral_ranges["z"] = z_term
-        y_term = HipsPropertiesSpectralTerm()
-        y_term.lambda_min = 970.0
-        y_term.lambda_max = 1060.0
-        self.spectral_ranges["y"] = y_term
+# LIV:
+# Classes in hips.py that will not be translated:
+# - class HipsPropertiesSpectralTerm(pexConfig.Config):
+# - class HipsPropertiesConfig(pexConfig.Config):
+# The following will be helpful as examples to read data stored by healpix dimension back from the Butler:
+# - class GenerateColorHipsConnections(
+# - class GenerateColorHipsConfig(GenerateHipsConfig, pipelineConnections=GenerateColorHipsConnections):
+# - class GenerateColorHipsTask(GenerateHipsTask):
 
 
 class GenerateHipsConnections(
@@ -1462,95 +1341,3 @@ class GenerateHipsTask(pipeBase.PipelineTask):
             HiPS directory number.
         """
         return (pixel // 10000) * 10000
-
-
-# LIV: Won't need, but will be helpful as examples to read data stored by healpix dimension back from the Butler
-class GenerateColorHipsConnections(
-    pipeBase.PipelineTaskConnections, dimensions=("instrument",), defaultTemplates={"coaddName": "deep"}
-):
-    hips_exposure_handles = pipeBase.connectionTypes.Input(
-        doc="HiPS-compatible HPX images.",
-        name="{coaddName}Coadd_hpx",
-        storageClass="ExposureF",
-        dimensions=("healpix11", "band"),
-        multiple=True,
-        deferLoad=True,
-    )
-
-
-class GenerateColorHipsConfig(GenerateHipsConfig, pipelineConnections=GenerateColorHipsConnections):
-    """Configuration parameters for GenerateColorHipsTask."""
-
-    blue_channel_band = pexConfig.Field(
-        doc="Band to use for blue channel of color pngs.",
-        dtype=str,
-        default="g",
-    )
-    green_channel_band = pexConfig.Field(
-        doc="Band to use for green channel of color pngs.",
-        dtype=str,
-        default="r",
-    )
-    red_channel_band = pexConfig.Field(
-        doc="Band to use for red channel of color pngs.",
-        dtype=str,
-        default="i",
-    )
-    png_color_asinh_minimum = pexConfig.Field(
-        doc="AsinhMapping intensity to be mapped to black for color png scaling.",
-        dtype=float,
-        default=0.0,
-    )
-    png_color_asinh_stretch = pexConfig.Field(
-        doc="AsinhMapping linear stretch for color png scaling.",
-        dtype=float,
-        default=5.0,
-    )
-    png_color_asinh_softening = pexConfig.Field(
-        doc="AsinhMapping softening parameter (Q) for color png scaling.",
-        dtype=float,
-        default=8.0,
-    )
-
-
-class GenerateColorHipsTask(GenerateHipsTask):
-    """Task for making a HiPS tree with color pngs."""
-
-    ConfigClass = GenerateColorHipsConfig
-    _DefaultName = "generateColorHips"
-    color_task = True
-
-    def _check_data_bands(self, data_bands):
-        """Check the data for configured bands.
-
-        Warn if any color bands are missing data.
-
-        Parameters
-        ----------
-        data_bands : `set` [`str`]
-            Bands from the input data.
-
-        Returns
-        -------
-        bands : `list` [`str`]
-           List of bands in bgr color order.
-        """
-        if len(data_bands) == 0:
-            raise RuntimeError("GenerateColorHipsTask must have data from at least one band.")
-
-        if self.config.blue_channel_band not in data_bands:
-            self.log.warning("Color png blue_channel_band %s not in dataset.", self.config.blue_channel_band)
-        if self.config.green_channel_band not in data_bands:
-            self.log.warning(
-                "Color png green_channel_band %s not in dataset.", self.config.green_channel_band
-            )
-        if self.config.red_channel_band not in data_bands:
-            self.log.warning("Color png red_channel_band %s not in dataset.", self.config.red_channel_band)
-
-        bands = [
-            self.config.blue_channel_band,
-            self.config.green_channel_band,
-            self.config.red_channel_band,
-        ]
-
-        return bands
